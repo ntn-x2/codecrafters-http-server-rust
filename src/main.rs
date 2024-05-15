@@ -3,6 +3,12 @@ use std::{
     net::TcpListener,
 };
 
+fn return_echo_response(echo_payload: &str) -> Vec<u8> {
+    let payload_size = echo_payload.len();
+    let response_body = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {payload_size}\r\n\r\n{echo_payload}");
+    response_body.into_bytes()
+}
+
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
 
@@ -31,11 +37,14 @@ fn main() {
                     )
                 };
                 let res = match path {
-                    "/" => b"HTTP/1.1 200 OK\r\n\r\n".as_slice(),
-                    _ => b"HTTP/1.1 404 Not Found\r\n\r\n".as_slice(),
+                    "/" => b"HTTP/1.1 200 OK\r\n\r\n".to_vec(),
+                    s if s.starts_with("/echo/") => {
+                        return_echo_response(s.split_at("/echo/".len()).1)
+                    }
+                    _ => b"HTTP/1.1 404 Not Found\r\n\r\n".to_vec(),
                 };
                 stream
-                    .write_all(res)
+                    .write_all(res.as_slice())
                     .expect("Failed to send resp to client.");
             }
             Err(e) => {
