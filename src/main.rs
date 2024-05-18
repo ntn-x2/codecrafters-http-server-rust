@@ -1,6 +1,7 @@
 use std::{
     io::{BufRead, BufReader, Write},
     net::TcpListener,
+    thread,
 };
 
 fn echo_response(echo_payload: &str) -> Vec<u8> {
@@ -19,7 +20,7 @@ fn main() {
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
 
     for stream in listener.incoming() {
-        match stream {
+        thread::spawn(|| match stream {
             Ok(mut stream) => {
                 let (request, mut headers) = {
                     let mut buf_reader = BufReader::new(stream.try_clone().unwrap());
@@ -62,6 +63,6 @@ fn main() {
             Err(e) => {
                 println!("error: {}", e);
             }
-        }
+        });
     }
 }
