@@ -1,8 +1,10 @@
 use std::{
+    collections::HashMap,
     env,
     fs::File,
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
+    str::FromStr,
     thread,
 };
 
@@ -18,7 +20,7 @@ fn user_agent_response(user_agent: &str) -> Vec<u8> {
     response_body.into_bytes()
 }
 
-fn file_response(file_path: &str) -> Vec<u8> {
+fn get_file_response(file_path: &str) -> Vec<u8> {
     let Ok(mut file) = File::open(file_path) else {
         return b"HTTP/1.1 404 Not Found\r\n\r\n".to_vec();
     };
@@ -38,42 +40,136 @@ fn file_response(file_path: &str) -> Vec<u8> {
     }
 }
 
+fn post_file_response(file_path: &str, file_contents: Vec<u8>) -> Vec<u8> {
+    let mut file = File::create(file_path).expect("Cannot create file at path {file_path}");
+    file.write_all(file_contents.as_slice())
+        .expect("Cannot write provided content into file.");
+
+    b"HTTP/1.1 201 Created\r\n\r\n".to_vec()
+}
+
+struct HttpRequest {
+    method: HttpMethod,
+    path: String,
+    #[allow(dead_code)]
+    version: String,
+    headers: HashMap<String, String>,
+    #[allow(dead_code)]
+    body: Option<Vec<u8>>,
+}
+
+impl HttpRequest {
+    fn from_reader<R: Read>(r: R) -> Self {
+        let mut buf_reader = BufReader::new(r);
+        let (raw_method, path, version) = {
+            let mut buffer = String::new();
+            buf_reader
+                .read_line(&mut buffer)
+                .expect("Malformed HTTP request. No start line found.");
+            let mut iter = buffer.trim().split_ascii_whitespace();
+            (
+                iter.next().expect("No HTTP method found.").to_string(),
+                iter.next().expect("No path found.").to_string(),
+                iter.next().expect("No HTTP version found.").to_string(),
+            )
+        };
+        let method = raw_method.parse().expect("Unsupported HTTP method found.");
+        let headers = {
+            let mut buffer = String::new();
+            let mut map = HashMap::<String, String>::default();
+            loop {
+                buf_reader
+                    .read_line(&mut buffer)
+                    .expect("Malformed HTTP request. No start line found.");
+                let trimmed_string = buffer.trim();
+                if trimmed_string.is_empty() {
+                    break;
+                }
+                let (name, value) = {
+                    let mut iter = trimmed_string.split_ascii_whitespace();
+                    (
+                        iter.next()
+                            .expect("Failed to read header name.")
+                            .trim_end_matches(':'),
+                        iter.next().expect("Failed to read header value."),
+                    )
+                };
+                map.insert(name.to_string(), value.to_string());
+                buffer.clear();
+            }
+            map
+        };
+        let body = {
+            let content_length = {
+                if let Some(raw_cl) = headers.get("Content-Length") {
+                    raw_cl
+                        .parse::<usize>()
+                        .expect("Invalid value for header \"Content-Length\"")
+                } else {
+                    0
+                }
+            };
+            if content_length > 0 {
+                let mut buffer = vec![0; content_length];
+                buf_reader.read_exact(buffer.as_mut_slice()).unwrap();
+                Some(buffer)
+            } else {
+                None
+            }
+        };
+        Self {
+            method,
+            path,
+            version,
+            headers,
+            body,
+        }
+    }
+}
+
+enum HttpMethod {
+    Get,
+    Post,
+}
+
+impl FromStr for HttpMethod {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "GET" => Ok(Self::Get),
+            "POST" => Ok(Self::Post),
+            _ => Err("Invalid HTTP method found."),
+        }
+    }
+}
+
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
+
+    {
+        let args = env::args().collect::<Vec<_>>();
+        let (directory_flag, directory_path) = (args.get(1), args.get(2));
+        match (directory_flag, directory_path) {
+            (Some(flag), Some(path)) if flag == "--directory" => {
+                File::open(path).expect("No directory found at the specified path.");
+            }
+            _ => {}
+        }
+    }
 
     for stream in listener.incoming() {
         thread::spawn(|| match stream {
             Ok(mut stream) => {
-                let (request, mut headers) = {
-                    let mut buf_reader = BufReader::new(stream.try_clone().unwrap());
-                    let mut lines = Vec::new();
-                    loop {
-                        let mut tmp_buffer = String::new();
-                        buf_reader.read_line(&mut tmp_buffer).unwrap();
-                        let trimmed_tmp_buffer = tmp_buffer.trim();
-                        if trimmed_tmp_buffer.is_empty() {
-                            break;
-                        }
-                        lines.push(trimmed_tmp_buffer.to_string());
-                    }
-                    #[allow(clippy::unnecessary_to_owned)]
-                    (lines[0].clone(), lines[1..].to_owned().into_iter())
-                };
-                let (_method, path, _http_version) = {
-                    let mut components = request.split_ascii_whitespace();
-                    (
-                        components.next().unwrap(),
-                        components.next().unwrap(),
-                        components.next().unwrap(),
-                    )
-                };
-                let res = match path {
+                let req = HttpRequest::from_reader(stream.try_clone().unwrap());
+                let res = match req.path.as_str() {
                     "/" => b"HTTP/1.1 200 OK\r\n\r\n".to_vec(),
                     "/user-agent" => {
-                        let user_agent_header = headers
-                            .find_map(|h| h.strip_prefix("User-Agent: ").map(|s| s.to_string()))
-                            .unwrap();
-                        user_agent_response(&user_agent_header)
+                        let user_agent_header = req
+                            .headers
+                            .get("User-Agent")
+                            .expect("No User-Agent header found.");
+                        user_agent_response(user_agent_header.as_str())
                     }
                     s if s.starts_with("/echo/") => {
                         echo_response(s.strip_prefix("/echo/").unwrap())
@@ -88,7 +184,15 @@ fn main() {
                             }
                         };
                         let file_name = s.strip_prefix("/files/").unwrap();
-                        file_response(format!("{}/{file_name}", directory_path).as_str())
+                        match req.method {
+                            HttpMethod::Get => {
+                                get_file_response(format!("{directory_path}/{file_name}").as_str())
+                            }
+                            HttpMethod::Post => post_file_response(
+                                format!("{directory_path}/{file_name}").as_str(),
+                                req.body.unwrap_or_default(),
+                            ),
+                        }
                     }
                     _ => b"HTTP/1.1 404 Not Found\r\n\r\n".to_vec(),
                 };
