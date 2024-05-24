@@ -26,8 +26,9 @@ impl FromStr for AcceptType {
 fn echo_response(echo_payload: &str, accept_type: Option<&str>) -> Vec<u8> {
     let payload_size = echo_payload.len();
     let content_encoding_header = if let Some(accept_type) = accept_type {
-        if accept_type.parse::<AcceptType>().is_ok() {
-            format!("\r\nContent-Encoding: {accept_type}")
+        let mut types = accept_type.split(',').map(|s| s.trim());
+        if let Some(supported_type) = types.find(|t: &&str| t.parse::<AcceptType>().is_ok()) {
+            format!("\r\nContent-Encoding: {supported_type}")
         } else {
             "".to_owned()
         }
@@ -66,7 +67,6 @@ fn get_file_response(file_path: &str) -> Vec<u8> {
 
 fn post_file_response(file_path: &str, file_contents: Vec<u8>) -> Vec<u8> {
     let mut file = File::create(file_path).expect("Cannot create file at path {file_path}");
-    println!("{:#?}", file_contents);
     file.write_all(file_contents.as_slice())
         .expect("Cannot write provided content into file.");
 
@@ -110,15 +110,9 @@ impl HttpRequest {
                 if trimmed_string.is_empty() {
                     break;
                 }
-                let (name, value) = {
-                    let mut iter = trimmed_string.split_ascii_whitespace();
-                    (
-                        iter.next()
-                            .expect("Failed to read header name.")
-                            .trim_end_matches(':'),
-                        iter.next().expect("Failed to read header value."),
-                    )
-                };
+                let (name, value) = trimmed_string
+                    .split_once(": ")
+                    .expect("Failed to read header.");
                 map.insert(name.to_lowercase().to_string(), value.to_string());
                 buffer.clear();
             }
@@ -134,7 +128,6 @@ impl HttpRequest {
                     0
                 }
             };
-            println!("Content length: {content_length}");
             if content_length > 0 {
                 let mut buffer = vec![0; content_length];
                 buf_reader.read_exact(buffer.as_mut_slice()).unwrap();
