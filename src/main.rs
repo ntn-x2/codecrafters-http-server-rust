@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     env,
+    fmt::Display,
     fs::File,
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
@@ -10,6 +11,19 @@ use std::{
 
 enum AcceptType {
     Gzip,
+}
+
+impl AcceptType {
+    fn compress(&self, data: &[u8]) -> Vec<u8> {
+        match self {
+            Self::Gzip => {
+                let mut encoder =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                encoder.write_all(data).unwrap();
+                encoder.finish().unwrap()
+            }
+        }
+    }
 }
 
 impl FromStr for AcceptType {
@@ -23,20 +37,45 @@ impl FromStr for AcceptType {
     }
 }
 
+impl Display for AcceptType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Gzip => "gzip",
+        };
+        f.write_str(s)
+    }
+}
+
 fn echo_response(echo_payload: &str, accept_type: Option<&str>) -> Vec<u8> {
-    let payload_size = echo_payload.len();
-    let content_encoding_header = if let Some(accept_type) = accept_type {
+    let (payload_size, content_encoding_header, body) = if let Some(accept_type) = accept_type {
         let mut types = accept_type.split(',').map(|s| s.trim());
-        if let Some(supported_type) = types.find(|t: &&str| t.parse::<AcceptType>().is_ok()) {
-            format!("\r\nContent-Encoding: {supported_type}")
+        if let Some(supported_type) = types.find_map(|t| t.parse::<AcceptType>().ok()) {
+            let compressed_payload = supported_type.compress(echo_payload.as_bytes());
+            (
+                compressed_payload.len(),
+                format!("\r\nContent-Encoding: {supported_type}"),
+                compressed_payload,
+            )
         } else {
-            "".to_owned()
+            (
+                echo_payload.len(),
+                "".to_owned(),
+                echo_payload.as_bytes().into(),
+            )
         }
     } else {
-        "".to_owned()
+        (
+            echo_payload.len(),
+            "".to_owned(),
+            echo_payload.as_bytes().into(),
+        )
     };
-    let response_body = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {payload_size}{}\r\n\r\n{echo_payload}", content_encoding_header);
-    response_body.into_bytes()
+    let response_without_body = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {payload_size}{}\r\n\r\n",
+        content_encoding_header
+    )
+    .into_bytes();
+    response_without_body.into_iter().chain(body).collect()
 }
 
 fn user_agent_response(user_agent: &str) -> Vec<u8> {
