@@ -8,9 +8,33 @@ use std::{
     thread,
 };
 
-fn echo_response(echo_payload: &str) -> Vec<u8> {
+enum AcceptType {
+    Gzip,
+}
+
+impl FromStr for AcceptType {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "gzip" => Ok(Self::Gzip),
+            _ => Err("Invalid value for Accept-Type header."),
+        }
+    }
+}
+
+fn echo_response(echo_payload: &str, accept_type: Option<&str>) -> Vec<u8> {
     let payload_size = echo_payload.len();
-    let response_body = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {payload_size}\r\n\r\n{echo_payload}");
+    let content_encoding_header = if let Some(accept_type) = accept_type {
+        if accept_type.parse::<AcceptType>().is_ok() {
+            format!("\r\nContent-Encoding: {accept_type}")
+        } else {
+            "".to_owned()
+        }
+    } else {
+        "".to_owned()
+    };
+    let response_body = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {payload_size}{}\r\n\r\n{echo_payload}", content_encoding_header);
     response_body.into_bytes()
 }
 
@@ -35,13 +59,14 @@ fn get_file_response(file_path: &str) -> Vec<u8> {
         let response_without_body = format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {file_size}\r\n\r\n").into_bytes();
         response_without_body
             .into_iter()
-            .chain(file_content.into_iter())
+            .chain(file_content)
             .collect::<Vec<_>>()
     }
 }
 
 fn post_file_response(file_path: &str, file_contents: Vec<u8>) -> Vec<u8> {
     let mut file = File::create(file_path).expect("Cannot create file at path {file_path}");
+    println!("{:#?}", file_contents);
     file.write_all(file_contents.as_slice())
         .expect("Cannot write provided content into file.");
 
@@ -94,14 +119,14 @@ impl HttpRequest {
                         iter.next().expect("Failed to read header value."),
                     )
                 };
-                map.insert(name.to_string(), value.to_string());
+                map.insert(name.to_lowercase().to_string(), value.to_string());
                 buffer.clear();
             }
             map
         };
         let body = {
             let content_length = {
-                if let Some(raw_cl) = headers.get("Content-Length") {
+                if let Some(raw_cl) = headers.get("content-length") {
                     raw_cl
                         .parse::<usize>()
                         .expect("Invalid value for header \"Content-Length\"")
@@ -109,6 +134,7 @@ impl HttpRequest {
                     0
                 }
             };
+            println!("Content length: {content_length}");
             if content_length > 0 {
                 let mut buffer = vec![0; content_length];
                 buf_reader.read_exact(buffer.as_mut_slice()).unwrap();
@@ -167,12 +193,14 @@ fn main() {
                     "/user-agent" => {
                         let user_agent_header = req
                             .headers
-                            .get("User-Agent")
+                            .get("user-agent")
                             .expect("No User-Agent header found.");
                         user_agent_response(user_agent_header.as_str())
                     }
                     s if s.starts_with("/echo/") => {
-                        echo_response(s.strip_prefix("/echo/").unwrap())
+                        let accept_encoding_header =
+                            req.headers.get("accept-encoding").map(|s| s.as_str());
+                        echo_response(s.strip_prefix("/echo/").unwrap(), accept_encoding_header)
                     }
                     s if s.starts_with("/files/") => {
                         let args = env::args().collect::<Vec<_>>();
